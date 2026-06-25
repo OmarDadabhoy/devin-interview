@@ -4,23 +4,33 @@ Webhook endpoint that creates a [Devin](https://devin.ai) session when a ticket 
 
 Built with the [Devin API](https://docs.devin.ai/api-reference/overview).
 
-## Setup
+## Quick Start (Docker)
+
+```bash
+# Set your Devin API key
+export DEVIN_API_KEY="your-key-here"
+
+# Build and run
+docker compose up --build
+```
+
+The server starts on `http://localhost:8000`. Ticket data persists in a Docker
+volume across restarts.
+
+To stop:
+
+```bash
+docker compose down        # keeps data
+docker compose down -v     # removes data volume too
+```
+
+## Local Setup (without Docker)
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-```
-
-Set your Devin API key:
-
-```bash
 export DEVIN_API_KEY="your-key-here"
-```
-
-## Run
-
-```bash
 python main.py
 ```
 
