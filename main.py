@@ -53,6 +53,9 @@ CSV_FIELDS = [
 
 app = FastAPI(title="Devin Ticket Trigger")
 
+# In-memory notification log (ephemeral; resets on restart)
+_notifications: list[dict[str, str]] = []
+
 
 # ---------------------------------------------------------------------------
 # CSV helpers
@@ -197,6 +200,17 @@ async def _send_message(session_id: str, message: str) -> None:
 # Background session monitor
 # ---------------------------------------------------------------------------
 
+def _add_notification(ticket_id: str, title: str, message: str,
+                      level: str = "info") -> None:
+    _notifications.append({
+        "ticket_id": ticket_id,
+        "title": title,
+        "message": message,
+        "level": level,
+        "timestamp": _now_iso(),
+    })
+
+
 def _resolve_status(raw_status: str) -> str:
     """Map Devin API status to a simpler label for the dashboard."""
     mapping = {
@@ -240,11 +254,23 @@ async def _monitor_session(session_id: str, ticket: Ticket) -> None:
         })
 
         if raw_status in ("finished", "expired"):
+            end_level = "success" if raw_status == "finished" else "error"
+            end_label = "completed" if raw_status == "finished" else "failed"
+            _add_notification(
+                ticket.id, ticket.title,
+                f"Session {end_label} after {elapsed_min} min",
+                level=end_level,
+            )
             logger.info("Session %s ended with status=%s", session_id, raw_status)
             return
 
         if raw_status == "blocked" and not blocked_alerted:
             blocked_alerted = True
+            _add_notification(
+                ticket.id, ticket.title,
+                "Session is blocked — needs input",
+                level="warning",
+            )
             try:
                 await _send_message(
                     session_id,
@@ -256,6 +282,11 @@ async def _monitor_session(session_id: str, ticket: Ticket) -> None:
 
         if elapsed > SESSION_TIMEOUT_SECONDS and not timeout_alerted:
             timeout_alerted = True
+            _add_notification(
+                ticket.id, ticket.title,
+                f"Session running for {elapsed_min} min — check progress",
+                level="warning",
+            )
             try:
                 await _send_message(
                     session_id,
@@ -306,6 +337,14 @@ async def list_tickets() -> list[dict[str, str]]:
     return _read_rows()
 
 
+@app.get("/api/notifications")
+async def list_notifications(since: str = "") -> list[dict[str, str]]:
+    """Return notifications, optionally filtered to those after *since*."""
+    if not since:
+        return _notifications[-50:]
+    return [n for n in _notifications if n["timestamp"] > since][-50:]
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -331,11 +370,13 @@ DASHBOARD_HTML = """\
 <style>
   :root { --bg: #0f1117; --card: #1a1d27; --border: #2a2d37; --text: #e1e4eb;
           --muted: #8b8fa3; --green: #22c55e; --red: #ef4444; --blue: #3b82f6;
-          --yellow: #eab308; }
+          --yellow: #eab308; --purple: #a855f7; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
          sans-serif; background: var(--bg); color: var(--text); padding: 24px; }
-  h1 { font-size: 1.5rem; margin-bottom: 20px; }
+  .header { display: flex; align-items: center; justify-content: space-between;
+            margin-bottom: 20px; }
+  h1 { font-size: 1.5rem; }
   .stats { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 24px; }
   .stat-card { background: var(--card); border: 1px solid var(--border);
                border-radius: 10px; padding: 20px 24px; min-width: 160px;
@@ -365,12 +406,84 @@ DASHBOARD_HTML = """\
   a:hover { text-decoration: underline; }
   .empty { text-align: center; padding: 48px; color: var(--muted); }
   .refresh { color: var(--muted); font-size: 0.8rem; margin-bottom: 16px; }
+
+  /* Create ticket button */
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 10px 20px;
+         border: none; border-radius: 8px; font-size: 0.875rem; font-weight: 600;
+         cursor: pointer; transition: background 0.15s; }
+  .btn-primary { background: var(--blue); color: #fff; }
+  .btn-primary:hover { background: #2563eb; }
+  .btn-secondary { background: var(--border); color: var(--text); }
+  .btn-secondary:hover { background: #3a3d47; }
+
+  /* Modal */
+  .modal-overlay { display: none; position: fixed; inset: 0;
+                   background: rgba(0,0,0,0.6); z-index: 100;
+                   align-items: center; justify-content: center; }
+  .modal-overlay.open { display: flex; }
+  .modal { background: var(--card); border: 1px solid var(--border);
+           border-radius: 12px; padding: 28px; width: 480px; max-width: 95vw; }
+  .modal h2 { font-size: 1.2rem; margin-bottom: 20px; }
+  .form-group { margin-bottom: 16px; }
+  .form-group label { display: block; color: var(--muted); font-size: 0.8rem;
+                      text-transform: uppercase; letter-spacing: 0.05em;
+                      margin-bottom: 6px; }
+  .form-group input, .form-group textarea {
+    width: 100%; padding: 10px 12px; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); font-size: 0.875rem; font-family: inherit;
+    outline: none; transition: border-color 0.15s; }
+  .form-group input:focus, .form-group textarea:focus {
+    border-color: var(--blue); }
+  .form-group textarea { resize: vertical; min-height: 80px; }
+  .modal-actions { display: flex; gap: 12px; justify-content: flex-end;
+                   margin-top: 20px; }
+  .form-error { color: var(--red); font-size: 0.8rem; margin-top: 6px;
+                display: none; }
+
+  /* Toast notifications */
+  .toast-container { position: fixed; top: 20px; right: 20px; z-index: 200;
+                     display: flex; flex-direction: column; gap: 8px;
+                     max-width: 380px; }
+  .toast { padding: 14px 18px; border-radius: 10px; font-size: 0.85rem;
+           animation: slideIn 0.3s ease; border: 1px solid;
+           display: flex; align-items: flex-start; gap: 10px; }
+  .toast .toast-close { background: none; border: none; color: inherit;
+                        cursor: pointer; font-size: 1.1rem; padding: 0;
+                        line-height: 1; opacity: 0.6; flex-shrink: 0; }
+  .toast .toast-close:hover { opacity: 1; }
+  .toast .toast-body { flex: 1; }
+  .toast .toast-title { font-weight: 600; margin-bottom: 2px; }
+  .toast.success { background: rgba(34,197,94,0.12); border-color: rgba(34,197,94,0.3);
+                   color: var(--green); }
+  .toast.error   { background: rgba(239,68,68,0.12); border-color: rgba(239,68,68,0.3);
+                   color: var(--red); }
+  .toast.warning { background: rgba(234,179,8,0.12); border-color: rgba(234,179,8,0.3);
+                   color: var(--yellow); }
+  .toast.info    { background: rgba(59,130,246,0.12); border-color: rgba(59,130,246,0.3);
+                   color: var(--blue); }
+  @keyframes slideIn { from { transform: translateX(100%); opacity: 0; }
+                       to   { transform: translateX(0);    opacity: 1; } }
 </style>
 </head>
 <body>
-<h1>Devin Ticket Dashboard</h1>
+
+<!-- Toast container -->
+<div class="toast-container" id="toasts"></div>
+
+<!-- Header -->
+<div class="header">
+  <h1>Devin Ticket Dashboard</h1>
+  <button class="btn btn-primary" onclick="openModal()">
+    + New Ticket
+  </button>
+</div>
 <div class="refresh">Auto-refreshes every 10 s</div>
+
+<!-- Stats -->
 <div class="stats" id="stats"></div>
+
+<!-- Ticket table -->
 <table>
   <thead>
     <tr>
@@ -381,12 +494,128 @@ DASHBOARD_HTML = """\
   <tbody id="rows"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
 </table>
 
+<!-- Create-ticket modal -->
+<div class="modal-overlay" id="modal">
+  <div class="modal">
+    <h2>Create Ticket</h2>
+    <form id="ticketForm" onsubmit="return submitTicket(event)">
+      <div class="form-group">
+        <label for="tid">Ticket ID *</label>
+        <input id="tid" name="id" required placeholder="e.g. PROJ-123" />
+      </div>
+      <div class="form-group">
+        <label for="ttitle">Title *</label>
+        <input id="ttitle" name="title" required placeholder="Short summary" />
+      </div>
+      <div class="form-group">
+        <label for="tdesc">Description</label>
+        <textarea id="tdesc" name="description"
+                  placeholder="Detailed description (optional)"></textarea>
+      </div>
+      <div class="form-group">
+        <label for="turl">Ticket URL</label>
+        <input id="turl" name="url" type="url"
+               placeholder="https://...  (optional)" />
+      </div>
+      <div class="form-error" id="formError"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary"
+                onclick="closeModal()">Cancel</button>
+        <button type="submit" class="btn btn-primary"
+                id="submitBtn">Create</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <script>
+/* ---- Modal ---- */
+function openModal()  { document.getElementById('modal').classList.add('open'); }
+function closeModal() {
+  document.getElementById('modal').classList.remove('open');
+  document.getElementById('ticketForm').reset();
+  document.getElementById('formError').style.display = 'none';
+}
+document.getElementById('modal').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeModal();
+});
+
+async function submitTicket(e) {
+  e.preventDefault();
+  const btn = document.getElementById('submitBtn');
+  const errEl = document.getElementById('formError');
+  errEl.style.display = 'none';
+  btn.disabled = true;
+  btn.textContent = 'Creating...';
+
+  const form = document.getElementById('ticketForm');
+  const body = {
+    id: form.id.value.trim(),
+    title: form.title.value.trim(),
+    description: form.description.value.trim(),
+    url: form.url.value.trim(),
+  };
+
+  try {
+    const res = await fetch('/webhook/ticket', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `Server returned ${res.status}`);
+    }
+    const data = await res.json();
+    closeModal();
+    showToast('info', 'Ticket created',
+      `#${body.id} — Devin session started`);
+    load();
+  } catch (err) {
+    errEl.textContent = err.message;
+    errEl.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Create';
+  }
+  return false;
+}
+
+/* ---- Toasts ---- */
+function showToast(level, title, msg) {
+  const container = document.getElementById('toasts');
+  const el = document.createElement('div');
+  el.className = `toast ${level}`;
+  el.innerHTML = `<div class="toast-body">
+    <div class="toast-title">${title}</div>
+    <div>${msg}</div>
+  </div>
+  <button class="toast-close" onclick="this.parentElement.remove()">&times;</button>`;
+  container.appendChild(el);
+  setTimeout(() => el.remove(), 8000);
+}
+
+/* ---- Notification polling ---- */
+let lastNotifTs = '';
+async function pollNotifications() {
+  try {
+    const url = lastNotifTs
+      ? `/api/notifications?since=${encodeURIComponent(lastNotifTs)}`
+      : '/api/notifications';
+    const res = await fetch(url);
+    const items = await res.json();
+    for (const n of items) {
+      showToast(n.level, `#${n.ticket_id} ${n.title}`, n.message);
+      lastNotifTs = n.timestamp;
+    }
+  } catch (e) { /* ignore */ }
+}
+
+/* ---- Ticket table ---- */
 async function load() {
   const res = await fetch('/api/tickets');
   const tickets = await res.json();
 
-  // Stats
   const total = tickets.length;
   const active = tickets.filter(t => t.status === 'active').length;
   const completed = tickets.filter(t => t.status === 'completed').length;
@@ -406,7 +635,6 @@ async function load() {
       <div class="value yellow">${blocked}</div></div>
   `;
 
-  // Table
   const tbody = document.getElementById('rows');
   if (!tickets.length) {
     tbody.innerHTML = '<tr><td colspan="7" class="empty">No tickets yet</td></tr>';
@@ -424,6 +652,7 @@ async function load() {
 }
 load();
 setInterval(load, 10000);
+setInterval(pollNotifications, 10000);
 </script>
 </body>
 </html>
