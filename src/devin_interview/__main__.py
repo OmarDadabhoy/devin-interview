@@ -1,5 +1,11 @@
+import sys
+
+from devin_interview import greet
+
+
 def main() -> None:
-    print("devin-interview: replace this entry point with your solution.")
+    name = sys.argv[1] if len(sys.argv) > 1 else "World"
+    print(greet(name))
 
 
 if __name__ == "__main__":
