@@ -1,0 +1,13 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DEVIN_API_KEY=${DEVIN_API_KEY:-}
+      - CSV_PATH=/app/data/tickets.csv
+    volumes:
+      - ticket-data:/app/data
+
+volumes:
+  ticket-data:
