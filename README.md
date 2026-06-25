@@ -1,10 +1,8 @@
 # devin-interview
 
-Coding take-home.
+Webhook endpoint that creates a [Devin](https://devin.ai) session when a ticket is created.
 
-## Problem
-
-<!-- Paste the problem statement / brief here. -->
+Built with the [Devin API](https://docs.devin.ai/api-reference/overview).
 
 ## Setup
 
@@ -14,20 +12,30 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
+Set your Devin API key:
+
+```bash
+export DEVIN_API_KEY="your-key-here"
+```
+
 ## Run
 
 ```bash
-python -m devin_interview
+python main.py
 ```
 
-## Test
+The server starts on `http://localhost:8000`.
+
+## Usage
 
 ```bash
-pytest
+curl -X POST http://localhost:8000/webhook/ticket \
+  -H "Content-Type: application/json" \
+  -d '{"id": "PROJ-123", "title": "Fix login bug", "description": "Users cannot log in", "url": "https://example.com/tickets/123"}'
 ```
 
-## Layout
+## Health check
 
-- `src/devin_interview/` — solution code
-- `tests/` — tests
-- `pyproject.toml` — metadata, dependencies, pytest config
+```
+GET /health
+```
