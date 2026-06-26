@@ -4,54 +4,34 @@ Webhook endpoint that creates a [Devin](https://devin.ai) session when a ticket 
 
 Built with the [Devin API](https://docs.devin.ai/api-reference/overview).
 
-## Quick Start (Docker)
+## Quick Start
 
 ```bash
-# Set your Devin API key
 export DEVIN_API_KEY="your-key-here"
-
-# Build and run
 docker compose up --build
-```
-
-The server starts on `http://localhost:8000`. Ticket data persists in a Docker
-volume across restarts.
-
-To stop:
-
-```bash
-docker compose down        # keeps data
-docker compose down -v     # removes data volume too
-```
-
-## Local Setup (without Docker)
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-export DEVIN_API_KEY="your-key-here"
-python main.py
 ```
 
 The server starts on `http://localhost:8000`.
 
-## Usage
+## Stopping & Restarting
 
 ```bash
-curl -X POST http://localhost:8000/webhook/ticket \
-  -H "Content-Type: application/json" \
-  -d '{"id": "PROJ-123", "title": "Fix login bug", "description": "Users cannot log in", "url": "https://example.com/tickets/123"}'
+docker compose down          # stop (keeps data)
+docker compose up --build    # restart
+docker compose down -v       # stop and remove data
 ```
 
 ## Dashboard
 
-Open `http://localhost:8000/` in a browser to view the ticket dashboard.
-It shows active/completed counts, success/failure signals, and a table of
-every ticket submitted to the webhook. Data auto-refreshes every 10 seconds.
+Open `http://localhost:8000/` to view the dashboard.
 
-Ticket data is persisted to a local CSV file (`tickets.csv` by default).
-Override the path with the `CSV_PATH` environment variable.
+- **Summary cards** -- active, completed, failed, and blocked ticket counts at a glance.
+- **Create ticket** -- click **+ New Ticket**, fill in the ID, title, and optional description/URL, then hit **Create**. A Devin session starts automatically.
+- **Ticket table** -- lists every ticket with its status, elapsed time, Devin session link, and PR link. Click a row to expand progress details and Devin's report.
+- **Notifications** -- toast alerts appear in real time when a session finishes or fails.
+- **Auto-refresh** -- data refreshes every 10 seconds; no manual reload needed.
+
+Ticket data persists in a Docker volume. Override the CSV path with the `CSV_PATH` environment variable.
 
 ## API
 
