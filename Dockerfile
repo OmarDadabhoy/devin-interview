@@ -6,6 +6,7 @@ COPY pyproject.toml .
 RUN pip install --no-cache-dir .
 
 COPY main.py .
+COPY templates/ templates/
 
 EXPOSE 8000
 
