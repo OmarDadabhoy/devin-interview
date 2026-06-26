@@ -101,6 +101,33 @@
                    color: var(--blue); }
   @keyframes slideIn { from { transform: translateX(100%); opacity: 0; }
                        to   { transform: translateX(0);    opacity: 1; } }
+
+  /* Expandable detail row */
+  .expand-btn { background: none; border: none; color: var(--muted); cursor: pointer;
+                font-size: 0.9rem; padding: 4px 8px; transition: transform 0.2s;
+                line-height: 1; }
+  .expand-btn:hover { color: var(--text); }
+  .expand-btn.open { transform: rotate(90deg); }
+  .detail-row { display: none; }
+  .detail-row.open { display: table-row; }
+  .detail-cell { padding: 4px 16px 20px; }
+  .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px;
+                 padding: 16px; background: var(--bg); border-radius: 8px;
+                 border: 1px solid var(--border); }
+  .detail-section h3 { font-size: 0.8rem; color: var(--muted); text-transform: uppercase;
+                       letter-spacing: 0.05em; margin-bottom: 12px; }
+  .progress-list { list-style: none; padding: 0; margin: 0; }
+  .progress-item { display: flex; align-items: flex-start; gap: 10px; padding: 6px 0;
+                   font-size: 0.85rem; }
+  .progress-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+                  margin-top: 5px; }
+  .progress-dot.done { background: var(--green); }
+  .progress-dot.current { background: var(--blue); box-shadow: 0 0 6px var(--blue); }
+  .report-part { margin-bottom: 14px; }
+  .report-label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase;
+                  letter-spacing: 0.05em; margin-bottom: 4px; }
+  .report-text { font-size: 0.85rem; line-height: 1.5; }
+  .no-data { color: var(--muted); font-size: 0.85rem; font-style: italic; }
 </style>
 </head>
 <body>
@@ -124,11 +151,11 @@
 <table>
   <thead>
     <tr>
-      <th>Ticket</th><th>Title</th><th>Status</th><th>Elapsed</th>
+      <th style="width:36px"></th><th>Ticket</th><th>Title</th><th>Status</th><th>Elapsed</th>
       <th>Session</th><th>PR</th><th>Created</th>
     </tr>
   </thead>
-  <tbody id="rows"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+  <tbody id="rows"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
 </table>
 
 <!-- Create-ticket modal -->
@@ -218,6 +245,99 @@ async function submitTicket(e) {
   return false;
 }
 
+/* ---- Expandable detail rows ---- */
+let openDetailSid = null;
+
+function toggleDetail(sid, btn) {
+  const dr = document.getElementById('detail-' + sid);
+  if (!dr) return;
+  const wasOpen = dr.classList.contains('open');
+  document.querySelectorAll('.detail-row.open').forEach(r => r.classList.remove('open'));
+  document.querySelectorAll('.expand-btn.open').forEach(b => b.classList.remove('open'));
+  openDetailSid = null;
+  if (!wasOpen) {
+    dr.classList.add('open');
+    btn.classList.add('open');
+    openDetailSid = sid;
+    fetchDetail(sid);
+  }
+}
+
+async function fetchDetail(sid) {
+  const el = document.getElementById('detail-content-' + sid);
+  if (!el) return;
+  try {
+    const res = await fetch('/api/tickets/' + sid + '/details');
+    const data = await res.json();
+    renderDetail(sid, data);
+  } catch (e) {
+    el.innerHTML = '<div class="no-data">Failed to load details</div>';
+  }
+}
+
+function escHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s || '';
+  return d.innerHTML;
+}
+
+function renderDetail(sid, data) {
+  const el = document.getElementById('detail-content-' + sid);
+  if (!el) return;
+  const so = data.progress || {};
+  const completed = so.completed_tasks || [];
+  const current = so.current_task || '';
+  let report = data.report || so.report || {};
+  if (typeof report === 'string') {
+    try { report = JSON.parse(report); } catch(e) { report = {text: report}; }
+  }
+
+  let html = '<div class="detail-grid">';
+
+  // Progress section
+  html += '<div class="detail-section"><h3>Progress</h3>';
+  if (completed.length || current) {
+    html += '<div class="progress-list">';
+    for (const task of completed) {
+      html += '<div class="progress-item"><span class="progress-dot done"></span>' + escHtml(task) + '</div>';
+    }
+    if (current) {
+      html += '<div class="progress-item"><span class="progress-dot current"></span>' + escHtml(current) + '</div>';
+    }
+    html += '</div>';
+  } else {
+    html += '<div class="no-data">No progress updates yet</div>';
+  }
+  html += '</div>';
+
+  // Report section
+  html += '<div class="detail-section"><h3>Report</h3>';
+  const hasReport = typeof report === 'object' && report !== null &&
+    (report.what_solved || report.how_we_did_it || report.concrete_results);
+  if (hasReport) {
+    if (report.what_solved) {
+      html += '<div class="report-part"><div class="report-label">What we solved</div>';
+      html += '<div class="report-text">' + escHtml(report.what_solved) + '</div></div>';
+    }
+    if (report.how_we_did_it) {
+      html += '<div class="report-part"><div class="report-label">How we did it</div>';
+      html += '<div class="report-text">' + escHtml(report.how_we_did_it) + '</div></div>';
+    }
+    if (report.concrete_results) {
+      html += '<div class="report-part"><div class="report-label">Concrete results</div>';
+      html += '<div class="report-text">' + escHtml(report.concrete_results) + '</div></div>';
+    }
+  } else if (report && report.text) {
+    html += '<div class="report-text">' + escHtml(report.text) + '</div>';
+  } else {
+    html += '<div class="no-data">No report available yet</div>';
+  }
+  html += '</div>';
+
+  html += '</div>';
+  el.innerHTML = html;
+}
+
 /* ---- Toasts ---- */
 function showToast(level, title, msg) {
   const container = document.getElementById('toasts');
@@ -274,10 +394,11 @@ async function load() {
 
   const tbody = document.getElementById('rows');
   if (!tickets.length) {
-    tbody.innerHTML = '<tr><td colspan="7" class="empty">No tickets yet</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="empty">No tickets yet</td></tr>';
     return;
   }
   tbody.innerHTML = tickets.map(t => `<tr>
+    <td><button class="expand-btn" data-sid="${t.session_id}" onclick="toggleDetail('${t.session_id}',this)">&#9654;</button></td>
     <td>${t.ticket_url ? '<a href="'+t.ticket_url+'">#'+t.ticket_id+'</a>' : '#'+t.ticket_id}</td>
     <td>${t.title}</td>
     <td><span class="badge ${t.status}">${t.status}</span></td>
@@ -285,7 +406,25 @@ async function load() {
     <td><a href="${t.session_url}" target="_blank">View</a></td>
     <td>${t.pr_url ? '<a href="'+t.pr_url+'" target="_blank">PR</a>' : '—'}</td>
     <td>${t.created_at ? new Date(t.created_at).toLocaleString() : '—'}</td>
+  </tr>
+  <tr class="detail-row" id="detail-${t.session_id}">
+    <td colspan="8" class="detail-cell">
+      <div id="detail-content-${t.session_id}"><div class="no-data">Loading details…</div></div>
+    </td>
   </tr>`).join('');
+
+  // Re-open detail row if it was open before refresh
+  if (openDetailSid) {
+    const dr = document.getElementById('detail-' + openDetailSid);
+    const btn = document.querySelector('.expand-btn[data-sid="'+openDetailSid+'"]');
+    if (dr && btn) {
+      dr.classList.add('open');
+      btn.classList.add('open');
+      fetchDetail(openDetailSid);
+    } else {
+      openDetailSid = null;
+    }
+  }
 }
 load();
 setInterval(load, 10000);
