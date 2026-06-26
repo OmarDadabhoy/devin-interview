@@ -309,13 +309,19 @@ async def _monitor_session(session_id: str, ticket: Ticket) -> None:
         raw_status = data.get("status_enum") or data.get("status", "")
         elapsed = time.monotonic() - start
         elapsed_min = int(elapsed // 60)
-        dash_status = _resolve_status(raw_status)
 
         # Extract PR URL
         pr_url = ""
         pr_info = data.get("pull_request")
         if pr_info and isinstance(pr_info, dict):
             pr_url = pr_info.get("url", "")
+
+        # A blocked session with a PR is effectively done — merging
+        # is the user's responsibility, not Devin's.
+        if raw_status == "blocked" and pr_url:
+            raw_status = "finished"
+
+        dash_status = _resolve_status(raw_status)
 
         # Extract structured output and messages
         so = data.get("structured_output") or {}
@@ -374,6 +380,10 @@ async def _monitor_session(session_id: str, ticket: Ticket) -> None:
                 ticket.id, ticket.title,
                 "Session is blocked — needs input",
                 level="warning",
+            )
+            logger.info(
+                "Session %s blocked (no PR yet) — alerting user",
+                session_id,
             )
             try:
                 await _send_message(
