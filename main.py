@@ -18,6 +18,7 @@ Environment variables:
 
 import asyncio
 import csv
+import json
 import logging
 import os
 import time
@@ -36,6 +37,30 @@ DEVIN_API_BASE = "https://api.devin.ai/v1"
 SESSION_TIMEOUT_SECONDS = 20 * 60
 POLL_INTERVAL_SECONDS = 60
 
+STRUCTURED_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "current_task": {
+            "type": "string",
+            "description": "What you are currently working on",
+        },
+        "completed_tasks": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Steps completed so far",
+        },
+        "report": {
+            "type": "object",
+            "properties": {
+                "what_solved": {"type": "string"},
+                "how_we_did_it": {"type": "string"},
+                "concrete_results": {"type": "string"},
+            },
+            "description": "Final concise report after PR is created",
+        },
+    },
+}
+
 CSV_PATH = Path(os.environ.get("CSV_PATH", "tickets.csv"))
 CSV_FIELDS = [
     "ticket_id",
@@ -49,12 +74,16 @@ CSV_FIELDS = [
     "updated_at",
     "elapsed_minutes",
     "pr_url",
+    "report",
 ]
 
 app = FastAPI(title="Devin Ticket Trigger")
 
 # In-memory notification log (ephemeral; resets on restart)
 _notifications: list[dict[str, str]] = []
+
+# In-memory session details (structured output + messages, keyed by session_id)
+_session_details: dict[str, dict] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +105,11 @@ def _append_row(row: dict[str, str]) -> None:
 def _read_rows() -> list[dict[str, str]]:
     _ensure_csv()
     with CSV_PATH.open(newline="") as f:
-        return list(csv.DictReader(f))
+        rows = list(csv.DictReader(f))
+    for row in rows:
+        for field in CSV_FIELDS:
+            row.setdefault(field, "")
+    return rows
 
 
 def _update_row(session_id: str, updates: dict[str, str]) -> None:
@@ -126,7 +159,13 @@ REPORT_INSTRUCTIONS = (
     "   a. What we solved – one-liner summary of the fix.\n"
     "   b. How we did it – brief description of the approach.\n"
     "   c. Concrete results – test output, before/after, or metrics.\n"
-    "Keep the report as short as possible — no filler."
+    "Keep the report as short as possible — no filler.\n\n"
+    "3. Throughout your work, update the structured output:\n"
+    "   - Set 'current_task' to what you are actively doing.\n"
+    "   - Append each finished step to 'completed_tasks'.\n"
+    "   - Once the PR is created, fill in 'report' with\n"
+    "     'what_solved', 'how_we_did_it', and 'concrete_results'.\n"
+    "   Update structured output immediately on each step change."
 )
 
 
@@ -164,7 +203,10 @@ async def _create_devin_session(prompt: str) -> dict[str, Any]:
         resp = await client.post(
             f"{DEVIN_API_BASE}/sessions",
             headers=_auth_headers(api_key),
-            json={"prompt": prompt},
+            json={
+                "prompt": prompt,
+                "structured_output_schema": STRUCTURED_OUTPUT_SCHEMA,
+            },
         )
         if resp.status_code != 200:
             raise HTTPException(
@@ -222,11 +264,38 @@ def _resolve_status(raw_status: str) -> str:
     return mapping.get(raw_status, "active")
 
 
+def _format_message(msg: Any) -> dict[str, str]:
+    """Normalise a session message from the API into a simple dict."""
+    if isinstance(msg, dict):
+        return {
+            "role": msg.get("role", msg.get("type", "unknown")),
+            "content": msg.get("content", msg.get("message", str(msg))),
+            "timestamp": str(msg.get("timestamp", msg.get("created_at", ""))),
+        }
+    return {"role": "unknown", "content": str(msg), "timestamp": ""}
+
+
+def _extract_report_from_messages(messages: list) -> str:
+    """Fallback: scan session messages for a report-like message."""
+    for msg in reversed(messages):
+        content = ""
+        if isinstance(msg, dict):
+            content = msg.get("content", msg.get("message", ""))
+        elif isinstance(msg, str):
+            content = msg
+        lower = content.lower()
+        if any(kw in lower for kw in ["what we solved", "how we did it",
+                                       "concrete results"]):
+            return content
+    return ""
+
+
 async def _monitor_session(session_id: str, ticket: Ticket) -> None:
     """Poll session status; nudge the user if blocked or running too long."""
     start = time.monotonic()
     timeout_alerted = False
     blocked_alerted = False
+    last_completed_count = 0
 
     while True:
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
@@ -242,16 +311,51 @@ async def _monitor_session(session_id: str, ticket: Ticket) -> None:
         elapsed_min = int(elapsed // 60)
         dash_status = _resolve_status(raw_status)
 
+        # Extract PR URL
         pr_url = ""
         pr_info = data.get("pull_request")
         if pr_info and isinstance(pr_info, dict):
             pr_url = pr_info.get("url", "")
 
-        _update_row(session_id, {
+        # Extract structured output and messages
+        so = data.get("structured_output") or {}
+        messages = data.get("messages") or []
+
+        # Notify on newly completed tasks
+        completed = so.get("completed_tasks") or []
+        if len(completed) > last_completed_count:
+            for task in completed[last_completed_count:]:
+                _add_notification(
+                    ticket.id, ticket.title,
+                    f"Step done: {task}",
+                    level="info",
+                )
+            last_completed_count = len(completed)
+
+        # Store live progress details
+        _session_details[session_id] = {
+            "structured_output": so,
+            "messages": [_format_message(m) for m in messages],
+        }
+
+        # Build CSV row update
+        row_updates: dict[str, str] = {
             "status": dash_status,
             "elapsed_minutes": str(elapsed_min),
             "pr_url": pr_url,
-        })
+        }
+
+        # On completion, extract and persist the report
+        if raw_status in ("finished", "expired"):
+            report_obj = so.get("report") or {}
+            if report_obj:
+                row_updates["report"] = json.dumps(report_obj)
+            else:
+                report_text = _extract_report_from_messages(messages)
+                if report_text:
+                    row_updates["report"] = report_text
+
+        _update_row(session_id, row_updates)
 
         if raw_status in ("finished", "expired"):
             end_level = "success" if raw_status == "finished" else "error"
@@ -324,6 +428,7 @@ async def on_ticket_created(ticket: Ticket) -> SessionResponse:
         "updated_at": now,
         "elapsed_minutes": "0",
         "pr_url": "",
+        "report": "",
     })
 
     asyncio.create_task(_monitor_session(session_id, ticket))
@@ -343,6 +448,30 @@ async def list_notifications(since: str = "") -> list[dict[str, str]]:
     if not since:
         return _notifications[-50:]
     return [n for n in _notifications if n["timestamp"] > since][-50:]
+
+
+@app.get("/api/tickets/{session_id}/details")
+async def ticket_details(session_id: str) -> dict[str, Any]:
+    """Return progress and report details for a session."""
+    details = _session_details.get(session_id, {})
+
+    # Get persisted report from CSV
+    rows = _read_rows()
+    row = next((r for r in rows if r["session_id"] == session_id), {})
+    report_raw = row.get("report", "")
+
+    report: dict | str = {}
+    if report_raw:
+        try:
+            report = json.loads(report_raw)
+        except (json.JSONDecodeError, TypeError):
+            report = {"text": report_raw}
+
+    return {
+        "progress": details.get("structured_output", {}),
+        "messages": details.get("messages", []),
+        "report": report,
+    }
 
 
 @app.get("/health")
